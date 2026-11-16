@@ -7,6 +7,8 @@ A retrieval-augmented generation app over fraud/AML documents, with measured ret
 
 Ships with three short sample documents (`data/sample_docs/`: APP scams, money mules, card-not-present fraud) and an 11-question eval set (`data/eval_set.json`), so it runs out of the box.
 
+📖 New here? Read [BLOG_POST.md](BLOG_POST.md) — a file-by-file walkthrough of the whole project.
+
 ## Run commands
 
 Run these in order from the repo root:
