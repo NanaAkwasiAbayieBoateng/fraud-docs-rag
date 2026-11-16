@@ -5,6 +5,9 @@ venv/
 .env
 *.joblib
 *.onnx
-data/
 mlruns/
 .pytest_cache/
+
+# Generated index (rebuild with: python -m rag_app.ingest)
+data/index.json
+mlflow.db
