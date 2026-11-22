@@ -1,0 +1,38 @@
+# Fraud Docs RAG — app + Ollama in one stack.
+#
+#   docker compose up --build
+#
+# First run pulls the two Ollama models (~5 GB total) via the one-shot
+# ollama-pull service; the app waits for that to finish before starting.
+# Models persist in the ollama_models volume, so later runs start fast.
+# The app is then at http://localhost:8000 (GET /health, POST /ask).
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["sh", "-c", "ollama pull llama3.1:8b && ollama pull nomic-embed-text"]
+    restart: "no"
+
+  app:
+    build: .
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    ports:
+      - "8000:8000"
+
+volumes:
+  ollama_models:

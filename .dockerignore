@@ -1,0 +1,14 @@
+.git
+.github
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+reports/
+tests/
+scripts/
+*.md
+LICENSE
+Dockerfile
+docker-compose.yml
+.dockerignore

@@ -55,6 +55,27 @@ python -m rag_app.ingest --fake
 RAG_FAKE_LLM=1 uvicorn rag_app.main:app --port 8000
 ```
 
+## Run with Docker
+
+No local Python or Ollama install needed — the compose stack runs both:
+
+```bash
+docker compose up --build
+```
+
+First run pulls the two Ollama models (~5 GB) via a one-shot
+`ollama-pull` service; the app waits for it, then serves at
+http://localhost:8000 (`GET /health`, `POST /ask`). Models persist in a
+named volume, so later runs start fast. `docker compose down` stops the
+stack (add `-v` to also delete the downloaded models).
+
+App image only, against an Ollama already running on your machine:
+
+```bash
+docker build -t fraud-docs-rag .
+docker run --rm -p 8000:8000 -e OLLAMA_HOST=http://host.docker.internal:11434 fraud-docs-rag
+```
+
 ## How it works
 
 - `rag_app/ollama_client.py` — Ollama HTTP client (chat + embed) and a deterministic `FakeOllamaClient` for tests/offline runs.

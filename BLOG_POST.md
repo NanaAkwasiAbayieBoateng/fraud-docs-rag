@@ -447,3 +447,25 @@ embeddings.
 The scaffold's job was to make every one of those steps a small,
 measurable change instead of a rewrite. That part, at least, the
 numbers and the tests can vouch for.
+
+---
+
+## Added later: Docker (2026-11-22)
+
+Three files package the project so it runs anywhere with one command:
+
+- **`Dockerfile`** — a `python:3.12-slim` image for the API only.
+  Dependencies install in their own layer (cached unless
+  `requirements.txt` changes), then the `rag_app/` code and the
+  prebuilt `data/` index are copied in. The app runs as a non-root
+  user, and a `HEALTHCHECK` polls `GET /health`. Ollama is
+  deliberately *not* in this image — the app already talks to it over
+  HTTP via `OLLAMA_HOST`, so the model server stays a separate,
+  replaceable piece.
+- **`docker-compose.yml`** — the full stack: an `ollama` service
+  (models persisted in a named volume), a one-shot `ollama-pull`
+  service that downloads `llama3.1:8b` and `nomic-embed-text`, and the
+  `app` service, which waits for the pull to finish before starting.
+  `docker compose up --build` is the whole setup.
+- **`.dockerignore`** — keeps `.git`, caches, tests and docs out of
+  the build context, so the image stays small and rebuilds stay fast.
