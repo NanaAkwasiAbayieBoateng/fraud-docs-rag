@@ -18,7 +18,7 @@ Run these in order from the repo root:
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 2. Install dependencies
+# 2. Install dependencies (runtime only; the Docker image uses this file too)
 pip install -r requirements.txt
 
 # 3. Pull the Ollama models (Ollama must be installed and running)
@@ -35,6 +35,7 @@ uvicorn rag_app.main:app --port 8000
 python scripts/run_eval.py
 
 # 7. Run the tests (no Ollama or network needed — they use a fake client)
+pip install -r requirements-dev.txt
 pytest -q
 ```
 
@@ -65,9 +66,12 @@ docker compose up --build
 
 First run pulls the two Ollama models (~5 GB) via a one-shot
 `ollama-pull` service; the app waits for it, then serves at
-http://localhost:8000 (`GET /health`, `POST /ask`). Models persist in a
-named volume, so later runs start fast. `docker compose down` stops the
-stack (add `-v` to also delete the downloaded models).
+http://localhost:8000 (`GET /health`, `POST /ask`). On that first start
+the app also builds its search index from the sample docs (a fresh
+clone has none — `data/index.json` is generated, not committed).
+Models persist in a named volume, so later runs start fast.
+`docker compose down` stops the stack (add `-v` to also delete the
+downloaded models).
 
 App image only, against an Ollama already running on your machine:
 

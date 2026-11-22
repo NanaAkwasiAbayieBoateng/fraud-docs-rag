@@ -3,7 +3,8 @@
 #   docker compose up --build
 #
 # First run pulls the two Ollama models (~5 GB total) via the one-shot
-# ollama-pull service; the app waits for that to finish before starting.
+# ollama-pull service; the app waits for that to finish before starting,
+# and builds its search index from the sample docs on first start.
 # Models persist in the ollama_models volume, so later runs start fast.
 # The app is then at http://localhost:8000 (GET /health, POST /ask).
 

@@ -1,0 +1,4 @@
+# Development-only dependencies (the test suite). The Docker image
+# installs requirements.txt only, so pytest never ships in the image.
+-r requirements.txt
+pytest==9.2.0

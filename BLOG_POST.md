@@ -39,9 +39,12 @@ real RAG system: ingest → chunk → embed → retrieve → answer → evaluate
 | **Hybrid search** | Fuses the vector ranking and the BM25 ranking | Each method has blind spots: vectors miss exact terminology, keywords miss paraphrases. Averaging the two normalised rankings is simple and measurably better than either alone. |
 | **httpx** | HTTP calls to Ollama | Modern, small, and also used by FastAPI's test client — one less dependency to learn. |
 | **pytest + a fake Ollama client** | The test suite | Tests must run anywhere, including CI with no Ollama installed. So the codebase has a `FakeOllamaClient` with the same interface as the real one — tests inject it and never touch the network. |
+| **Docker + Compose** | Packaging and one-command startup | The app already talks to Ollama over HTTP, so the two containerise as separate services: a small image for the API, the stock Ollama image for the models, and Compose to wire them together. Anyone can run the whole system with `docker compose up --build` — no Python or Ollama install to get right first. |
 
 The dependency list really is that short: `fastapi`, `uvicorn`, `httpx`,
-`pydantic`, `numpy`, `rank_bm25`, `pytest`.
+`pydantic`, `numpy`, `rank_bm25` — pinned in `requirements.txt`, which
+is also exactly what the Docker image installs. `pytest` lives in
+`requirements-dev.txt`, so the test runner never ships in the image.
 
 ---
 
@@ -77,6 +80,12 @@ before it, which is also the order to read the code in.
    under each chunking strategy, runs all 11 questions, and writes the
    comparison table. Change anything, re-run, compare numbers — not
    vibes.
+8. **Packaging.** Finally, the whole thing was containerised: a
+   Dockerfile for the API, a Compose file that runs it next to
+   Ollama, and an entrypoint that builds the index on first start —
+   because the index is a generated artifact, a fresh clone doesn't
+   have one. The packaging files are walked through after
+   `requirements.txt` below.
 
 ---
 
@@ -322,11 +331,69 @@ seconds (`pytest -q` → 21 passed):
   refused with the exact refusal message and no citations; an empty
   index refuses everything.
 
-### `requirements.txt`
+### `requirements.txt` and `requirements-dev.txt`
 
-Seven lines: `fastapi`, `uvicorn` (the server), `httpx`, `pydantic`
-(FastAPI's validation layer), `numpy`, `rank_bm25`, `pytest`.
-Unpinned — fine for a scaffold; pin before anything production-shaped.
+`requirements.txt` is the runtime list, and since the Docker work it
+is pinned and runtime-only — six lines: `fastapi`, `uvicorn` (the
+server), `httpx`, `pydantic` (FastAPI's validation layer), `numpy`,
+`rank_bm25`. Pinning matters more once a Dockerfile installs the file:
+the image you build next month should be the image you tested.
+
+`pytest` moved to `requirements-dev.txt`, which starts with
+`-r requirements.txt` and adds the test runner on top. Local
+development installs the dev file; the Docker image installs only the
+runtime file, so the shipped image carries no test tooling.
+
+### `Dockerfile`
+
+A `python:3.12-slim` image for the API — and only the API. Ollama is
+deliberately *not* in it: the app already reaches the model server
+over HTTP via `OLLAMA_HOST`, so the two stay separate, replaceable
+pieces (and the multi-gigabyte models never bloat the app image).
+
+The build is layered for caching: `requirements.txt` is copied and
+installed first, so that layer is reused unless the dependencies
+change; the `rag_app/` code, the `data/` folder, and the entrypoint
+script are copied after. The container runs as a non-root user
+(`appuser`), exposes port 8000, and carries a `HEALTHCHECK` that
+polls `GET /health` — the endpoint already reports the loaded models
+and chunk count, so it doubles as proof the index loaded.
+
+### `docker-entrypoint.sh`
+
+The small shell script the image starts with. It exists because of
+one awkward fact: `data/index.json` is gitignored (see `.gitignore`
+below), so a fresh clone — which is what a Docker build usually
+starts from — has no index, and the app would boot empty and refuse
+every question. The entrypoint checks: if `data/index.json` is
+missing, it builds it from `data/sample_docs` with the ingest module;
+either way it then `exec`s uvicorn, so the server runs as the
+container's main process and receives its signals properly.
+
+### `docker-compose.yml`
+
+The full stack, three services:
+
+- **`ollama`** — the stock `ollama/ollama` image, with the downloaded
+  models persisted in a named volume so they survive restarts.
+- **`ollama-pull`** — a one-shot service that pulls `llama3.1:8b` and
+  `nomic-embed-text` (~5 GB on first run) and exits.
+- **`app`** — built from the Dockerfile, pointed at
+  `OLLAMA_HOST=http://ollama:11434`, and held back with
+  `depends_on … service_completed_successfully` until the model pull
+  finishes — so the entrypoint's first-start ingest has an embedding
+  model to talk to.
+
+`docker compose up --build` is the entire setup; the API answers on
+http://localhost:8000.
+
+### `.dockerignore`
+
+The build-context filter: `.git`, `__pycache__`, virtualenvs, the
+test suite, reports, and the docs stay out of the context, so builds
+are fast and the image contains only what it runs. (The sample
+documents under `data/` are *not* ignored — the entrypoint needs
+them to build the index on first start.)
 
 ### `.env.example`
 
@@ -401,11 +468,14 @@ the answer.
 
 ## Running it, results, and what's next
 
-**To run it**, follow the [README's Run commands](README.md#run-commands):
-create a venv, install `requirements.txt`, pull the two Ollama models,
-run the ingest command, start `uvicorn`. No Ollama? The README's
-offline variant (`ingest --fake` + `RAG_FAKE_LLM=1`) runs the whole
-thing on fake embeddings.
+**To run it**, the shortest path is Docker: `docker compose up
+--build` starts Ollama, pulls the models, builds the index, and
+serves the API. Without Docker, follow the [README's Run
+commands](README.md#run-commands): create a venv, install
+`requirements.txt`, pull the two Ollama models, run the ingest
+command, start `uvicorn`. No Ollama? The README's offline variant
+(`ingest --fake` + `RAG_FAKE_LLM=1`) runs the whole thing on fake
+embeddings.
 
 **Current eval results** (from `reports/eval_report.md` — sample
 corpus, fake embeddings, hybrid search at top-5):
@@ -448,24 +518,3 @@ The scaffold's job was to make every one of those steps a small,
 measurable change instead of a rewrite. That part, at least, the
 numbers and the tests can vouch for.
 
----
-
-## Added later: Docker (2026-11-22)
-
-Three files package the project so it runs anywhere with one command:
-
-- **`Dockerfile`** — a `python:3.12-slim` image for the API only.
-  Dependencies install in their own layer (cached unless
-  `requirements.txt` changes), then the `rag_app/` code and the
-  prebuilt `data/` index are copied in. The app runs as a non-root
-  user, and a `HEALTHCHECK` polls `GET /health`. Ollama is
-  deliberately *not* in this image — the app already talks to it over
-  HTTP via `OLLAMA_HOST`, so the model server stays a separate,
-  replaceable piece.
-- **`docker-compose.yml`** — the full stack: an `ollama` service
-  (models persisted in a named volume), a one-shot `ollama-pull`
-  service that downloads `llama3.1:8b` and `nomic-embed-text`, and the
-  `app` service, which waits for the pull to finish before starting.
-  `docker compose up --build` is the whole setup.
-- **`.dockerignore`** — keeps `.git`, caches, tests and docs out of
-  the build context, so the image stays small and rebuilds stay fast.
