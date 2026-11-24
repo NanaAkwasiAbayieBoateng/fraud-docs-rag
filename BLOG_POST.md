@@ -18,9 +18,10 @@ Everything runs locally and free: the language model and the embeddings
 come from [Ollama](https://ollama.com) running on your own machine. No API
 keys, no cloud bill, no data leaving the laptop.
 
-The shipped corpus is deliberately tiny — three short sample documents
-(authorised push payment scams, money mules, card-not-present fraud) and
-an 11-question test set — so the whole pipeline can be read, run, and
+The shipped corpus is deliberately tiny — six short sample documents
+(authorised push payment scams, money mules, card-not-present fraud,
+phishing and smishing, account takeover, crypto and investment scams)
+and a 31-question test set — so the whole pipeline can be read, run, and
 measured in an afternoon. The point of the scaffold is the *shape* of a
 real RAG system: ingest → chunk → embed → retrieve → answer → evaluate.
 
@@ -39,6 +40,9 @@ real RAG system: ingest → chunk → embed → retrieve → answer → evaluate
 | **Hybrid search** | Fuses the vector ranking and the BM25 ranking | Each method has blind spots: vectors miss exact terminology, keywords miss paraphrases. Averaging the two normalised rankings is simple and measurably better than either alone. |
 | **httpx** | HTTP calls to Ollama | Modern, small, and also used by FastAPI's test client — one less dependency to learn. |
 | **pytest + a fake Ollama client** | The test suite | Tests must run anywhere, including CI with no Ollama installed. So the codebase has a `FakeOllamaClient` with the same interface as the real one — tests inject it and never touch the network. |
+| **Reciprocal Rank Fusion** | The alternative fusion strategy | Fuses the vector and BM25 *rankings* instead of their scores, so it is immune to score-scale differences. Implemented alongside the original linear fusion so the eval harness can measure which one actually retrieves better — on this corpus, linear wins (see the results). |
+| **SQLite** (stdlib) | The second index-persistence backend | No new dependency: Python's built-in `sqlite3`. One row per chunk, embeddings as blobs — inspectable with ordinary SQL tooling, and the shape a real vector store would take behind the same interface. |
+| **GitHub Actions** | CI | Every push runs the tests, the offline eval, and a Docker build with a container smoke test — so a broken image or a retrieval regression is caught before it lands. |
 | **Docker + Compose** | Packaging and one-command startup | The app already talks to Ollama over HTTP, so the two containerise as separate services: a small image for the API, the stock Ollama image for the models, and Compose to wire them together. Anyone can run the whole system with `docker compose up --build` — no Python or Ollama install to get right first. |
 
 The dependency list really is that short: `fastapi`, `uvicorn`, `httpx`,
@@ -77,7 +81,7 @@ before it, which is also the order to read the code in.
    turned out to be the subtlest part of the build; it's explained in
    detail under `rag_app/main.py` below.
 7. **Evaluation last, and repeatable.** A script rebuilds the index
-   under each chunking strategy, runs all 11 questions, and writes the
+   under each chunking strategy, runs the eval questions, and writes the
    comparison table. Change anything, re-run, compare numbers — not
    vibes.
 8. **Packaging.** Finally, the whole thing was containerised: a
@@ -86,6 +90,16 @@ before it, which is also the order to read the code in.
    because the index is a generated artifact, a fresh clone doesn't
    have one. The packaging files are walked through after
    `requirements.txt` below.
+9. **Hardening, measured.** A second pass hardened the scaffold the
+   way the first pass built it — nothing without a measurement or a
+   test. CI went in first. The corpus and eval set grew until the
+   metrics could actually separate the strategies (at 3 documents
+   every score was a perfect 1.000, which measures nothing). Then:
+   refusal cases in the eval set, a query log so real refusals can
+   be studied, RRF as a second fusion strategy for the harness to
+   judge, a retrieval-only `/search` endpoint for debugging, an
+   optional reranker, and a SQLite persistence backend. Each piece
+   is walked through in its file's section below.
 
 ---
 
@@ -175,8 +189,25 @@ The heart of retrieval. Two dataclasses and one class:
      (default `alpha = 0.5`, an even split),
   4. returns the top-k results in fused order.
 
-  The whole index serialises to a single JSON file (`save` / `load`),
-  which is all the persistence this scale needs.
+  `search()` takes two more knobs. `sources` restricts the search to
+  named documents — the basis of the per-document filter on the API.
+  And `fusion` selects the strategy: the `linear` fusion above, or
+  `rrf` (Reciprocal Rank Fusion), which ignores score scales entirely
+  and fuses the two *rankings* — each chunk earns
+  `1 / (60 + rank)` from each list. RRF is the standard answer to the
+  normalisation gotcha below; whether it is actually *better* is an
+  empirical question, and the eval harness now answers it (on this
+  corpus, it isn't — linear fusion's recall@1 is higher; see the
+  results section).
+
+  Persistence has two backends behind `save_to` / `load_from`, chosen
+  by file suffix. The original is a single JSON file (`save` /
+  `load`). The second, `save_sqlite` / `load_sqlite`, writes one row
+  per chunk to a SQLite database with the embedding as a float64
+  blob — inspectable with SQL, and updatable row by row instead of
+  by rewriting one big blob. A served vector database (Qdrant,
+  pgvector) remains the production step, behind this same pair of
+  methods.
 
   **Gotcha worth knowing:** step 3's normalisation means the best hit
   *always* has a fused score near the top of the scale, even for a
@@ -215,12 +246,16 @@ Small file, two standard metrics:
 - `evaluate_rankings()` aggregates both over precomputed rankings;
   `evaluate_index()` is the convenience wrapper that runs every eval
   question through a live index first.
+- `evaluate_refusals()` scores the eval set's refusal cases: for each
+  question marked `expect_refusal`, it checks the top hit's raw
+  cosine against the same threshold the API's gate uses. Retrieval
+  metrics alone can't see a gate that answers everything; this can.
 
 ### `rag_app/main.py` — the API, citations, and the refusal gate
 
 The online half. A FastAPI app built by a `create_app()` factory
 (taking the client, index, and threshold as parameters — which is how
-tests inject fakes), with two endpoints:
+tests inject fakes), with three endpoints:
 
 - **`GET /health`** — reports the chat and embedding model names, the
   number of chunks loaded, and the list of source documents. Your
@@ -228,7 +263,12 @@ tests inject fakes), with two endpoints:
 - **`POST /ask`** — accepts `{"question": ..., "k": ...}`, and returns
   an answer, a `refused` flag, a list of citations (source, chunk
   index, score, and a 200-character excerpt each), and the best
-  match's score.
+  match's score. An optional `"source"` field restricts retrieval to
+  one document.
+- **`POST /search`** — the retrieval-only twin: same body, but it
+  returns the ranked hits (with all three scores per hit) and never
+  calls the chat model. When an answer looks wrong, this is how you
+  tell whether retrieval or generation is at fault.
 
 The flow inside `/ask`: embed the question → hybrid search → **refusal
 gate** → build a prompt from the numbered passages → chat → respond.
@@ -258,9 +298,38 @@ comfortably between the two bands. Below it, `/ask` returns the
 refusal message with `refused: true` and no citations — and never
 calls the chat model at all.
 
+**The query log.** Every `/ask` — answered or refused — appends one
+JSON line to `logs/queries.jsonl` (`RAG_QUERY_LOG`): timestamp,
+question, best score, refusal flag, and the sources cited. It is the
+feedback loop the threshold needs: sort the log by score and the
+questions sitting just above and below 0.25 are exactly the ones to
+read when deciding whether the gate is set right, and the refused
+questions are a ready-made list of what the corpus should cover
+next. Logging is wrapped so a failed write can never fail a request.
+
+**Optional reranking.** With `RAG_RERANK=1`, `/ask` retrieves a
+wider candidate set (up to 20), passes it through the reranker in
+`rag_app/rerank.py`, and only then takes the top-k into the prompt.
+The refusal gate still reads the first stage's top cosine, before
+reranking — the gate's semantics don't change with the ordering
+stage behind it.
+
+### `rag_app/rerank.py` — the second stage
+
+Hybrid search is tuned for recall: get the right chunk *into* the
+candidate set. Ordering the few chunks that reach the prompt deserves
+a second, pickier pass. In production that pass is a cross-encoder —
+one model scoring query and chunk jointly. This file ships the
+interface plus a dependency-free stand-in, `LexicalReranker`: it
+re-scores each candidate by how many distinct query terms the chunk
+covers, adds a bonus when the chunk contains the query as an exact
+phrase, and blends that with the first-stage score. It is honestly a
+heuristic — its job is to make the stage real (wired, tested,
+switchable) so a cross-encoder can replace it with one new class.
+
 ### `data/sample_docs/` — the corpus
 
-Three short, original guidance documents, each organised under clear
+Six short, original guidance documents, each organised under clear
 Markdown headings (which is what `structure_aware` chunking exploits):
 
 - **`app_scams.md`** — authorised push payment scams: what they are,
@@ -270,6 +339,12 @@ Markdown headings (which is what `structure_aware` chunking exploits):
   mule job offer, consequences when caught.
 - **`card_not_present.md`** — card-not-present fraud: 3-D Secure,
   credential stuffing, chargebacks and who bears their cost.
+- **`phishing_smishing.md`** — phishing and smishing: lookalike
+  messages and sites, spotting them, what to do after responding.
+- **`account_takeover.md`** — account takeover: how attackers get in,
+  the warning signs, recovery and prevention.
+- **`crypto_investment_scams.md`** — crypto and investment scams:
+  fake trading platforms, withdrawal-fee traps, recovery-agent scams.
 
 In a production version this folder is where a few hundred real
 guidance documents would live; the code doesn't care how many there
@@ -277,25 +352,34 @@ are.
 
 ### `data/eval_set.json` — the test questions
 
-Eleven questions in a simple JSON list, each shaped like:
+Thirty-one questions in a simple JSON list, each shaped like:
 
 ```json
 {"question": "How are money mules recruited?", "source": "money_mules.md"}
 ```
 
 The `source` label is the ground truth every metric is computed
-against. Small, but written *before* tuning — that's what makes the
-eval report meaningful rather than decorative.
+against. Four entries break the pattern on purpose: `"source": null`
+with `"expect_refusal": true` — off-topic questions (sourdough,
+weather, stock picks, poetry) that a correct system must refuse.
+They exist because the first eval set's blind spot was total: at 11
+easy questions every configuration scored a perfect 1.000, which
+looked like success and measured nothing. The set also includes
+near-miss questions whose wording leans toward the wrong document
+(a mule question phrased in crypto terms, a credential-stuffing
+question that belongs to account takeover, not cards) — those are
+the ones that separate the strategies in the results table.
 
 ### `scripts/run_eval.py` — the chunking comparison
 
 A standalone script (it adds the repo root to `sys.path` itself, so it
-runs from anywhere). For each of the three chunking strategies it
-builds a fresh index over the sample docs, runs all 11 eval questions
-through `evaluate_index`, and writes the comparison table to
-`reports/eval_report.md`. It uses the fake client by default, so it
-runs fully offline; pass `--real` to measure with real Ollama
-embeddings.
+runs from anywhere). For each combination of chunking strategy and
+fusion strategy (linear and RRF) it builds a fresh index over the
+sample docs, runs the eval questions through `evaluate_index`, scores
+the refusal cases with `evaluate_refusals`, and writes the comparison
+table to `reports/eval_report.md`. It uses the fake client by
+default, so it runs fully offline; pass `--real` to measure with
+real Ollama embeddings.
 
 ### `reports/eval_report.md` — the results
 
@@ -305,10 +389,10 @@ the closing section below). It's committed to the repo on purpose —
 the evaluation report is a first-class output of the project, not a
 by-product. Re-running the script overwrites it.
 
-### `tests/` — 21 tests, no Ollama required
+### `tests/` — 34 tests, no Ollama required
 
 Every test injects `FakeOllamaClient`, so the suite runs offline in
-seconds (`pytest -q` → 21 passed):
+seconds (`pytest -q` → 34 passed):
 
 - **`test_chunking.py`** (8 tests) — all three strategies return
   non-empty chunks; fixed-size respects its size limit and handles
@@ -316,20 +400,32 @@ seconds (`pytest -q` → 21 passed):
   structure-aware splits on headings with the `Title > Section`
   prefix, and falls back cleanly without headings; unknown strategy
   names raise `ValueError`.
-- **`test_index.py`** (5 tests) — on a three-document fixture corpus,
+- **`test_index.py`** (9 tests) — on a three-document fixture corpus,
   the right document ranks first for each topic; results come back
-  sorted by score; an empty index returns nothing; and a
-  save → load round-trip preserves chunks *and* search quality.
-- **`test_evaluate.py`** (4 tests) — the metric maths on known
+  sorted by score; an empty index returns nothing; a save → load
+  round-trip preserves chunks *and* search quality; RRF ranks the
+  right document first and rejects unknown fusion names; the source
+  filter restricts results (and returns nothing for an unknown
+  source); and a SQLite save → load round-trip preserves search
+  quality through the suffix-dispatched backend.
+- **`test_evaluate.py`** (5 tests) — the metric maths on known
   examples: recall hits and misses, reciprocal rank at ranks 1/2/3,
   aggregation across questions, and a `ValueError` when rankings and
-  eval set lengths disagree.
-- **`test_api.py`** (4 tests) — end-to-end through FastAPI's
+  eval set lengths disagree — plus refusal scoring: refusal items are
+  excluded from retrieval metrics and scored by `evaluate_refusals`.
+- **`test_api.py`** (10 tests) — end-to-end through FastAPI's
   `TestClient` with a fake client and a two-document index: `/health`
   reports the loaded index; an on-topic question is answered with the
   correct citation and a passing score; the sourdough question is
   refused with the exact refusal message and no citations; an empty
-  index refuses everything.
+  index refuses everything; `/search` returns ranked hits with no
+  answer attached; the source filter restricts both endpoints; the
+  query log records one answered and one refused question with their
+  scores; a rerank-enabled app still answers correctly; and `/health`
+  reports the RRF fusion when the app is configured for it.
+- **`test_rerank.py`** (2 tests) — the lexical reranker promotes a
+  chunk covering the whole query over a higher-scored chunk covering
+  part of it, and the exact-phrase bonus wins at k=1.
 
 ### `requirements.txt` and `requirements-dev.txt`
 
@@ -395,11 +491,25 @@ are fast and the image contains only what it runs. (The sample
 documents under `data/` are *not* ignored — the entrypoint needs
 them to build the index on first start.)
 
+### `.github/workflows/ci.yml`
+
+The repo's CI, two jobs on every push and pull request. The `test`
+job installs the dev requirements, runs the suite, and runs the
+offline eval — a retrieval regression that keeps every unit test
+green still fails here, in the report step's numbers if not its exit
+code. The `docker` job builds the image and smoke-tests the
+container: started with `RAG_FAKE_LLM=1`, the entrypoint builds the
+index from the sample docs with fake embeddings, and the job asserts
+`/health` reports a non-empty index. It is the check this project's
+Docker work always needed and a laptop-only workflow can't give:
+proof, on a clean machine, that the image builds and boots.
+
 ### `.env.example`
 
 The configuration template: copy to `.env` and adjust. Ollama host and
-model names, plus the app's three knobs — `RAG_INDEX_PATH`,
-`RAG_TOP_K` (default 5), `RAG_REFUSAL_THRESHOLD` (default 0.25) — and
+model names, plus the app's knobs — `RAG_INDEX_PATH`, `RAG_TOP_K`
+(default 5), `RAG_REFUSAL_THRESHOLD` (default 0.25), `RAG_FUSION`
+(`linear` or `rrf`), `RAG_RERANK`, `RAG_QUERY_LOG` — and
 `RAG_FAKE_LLM` to switch the whole app to fake embeddings. Note the app
 reads these from the environment (via `os.getenv` in `main.py` and
 `ollama_client.py`); `.env` is gitignored so local settings never get
@@ -478,41 +588,53 @@ command, start `uvicorn`. No Ollama? The README's offline variant
 embeddings.
 
 **Current eval results** (from `reports/eval_report.md` — sample
-corpus, fake embeddings, hybrid search at top-5):
+corpus, fake embeddings, hybrid search at top-5, 27 sourced questions
+plus 4 refusal cases):
 
-| Chunking strategy | Chunks | Recall@1 | Recall@3 | Recall@5 | MRR |
-|---|---|---|---|---|---|
-| fixed_size | 11 | 1.000 | 1.000 | 1.000 | 1.000 |
-| recursive | 11 | 1.000 | 1.000 | 1.000 | 1.000 |
-| structure_aware | 13 | 1.000 | 1.000 | 1.000 | 1.000 |
+| Chunking | Fusion | Chunks | Recall@1 | Recall@3 | Recall@5 | MRR | Refusal acc |
+|---|---|---|---|---|---|---|---|
+| fixed_size | linear | 20 | 0.889 | 1.000 | 1.000 | 0.944 | 1.000 |
+| fixed_size | rrf | 20 | 0.815 | 0.963 | 1.000 | 0.898 | 1.000 |
+| recursive | linear | 20 | 0.889 | 0.963 | 1.000 | 0.933 | 1.000 |
+| recursive | rrf | 20 | 0.815 | 0.926 | 1.000 | 0.873 | 1.000 |
+| structure_aware | linear | 22 | 0.926 | 1.000 | 1.000 | 0.963 | 1.000 |
+| structure_aware | rrf | 22 | 0.926 | 0.963 | 1.000 | 0.952 | 1.000 |
 
-Perfect scores — and you should read them with suspicion. Three short
-documents and 11 questions is a smoke test, not a benchmark: the
-topics barely overlap, so retrieval has nothing hard to do. The honest
-conclusion is "the pipeline works end to end and the harness is ready
-to measure something harder", not "chunking doesn't matter". Re-run
-with `python scripts/run_eval.py --real` for numbers with production
-embeddings.
+The first version of this table was three rows of perfect 1.000s —
+three documents and 11 easy questions measured nothing. The expanded
+set earns its keep: the strategies finally separate
+(structure-aware + linear fusion leads), and RRF — the fashionable
+default — *loses* to plain linear fusion on this corpus. That is the
+harness doing its job: the answer to "which fusion?" is a number, not
+a preference, and the number can change when the corpus or the
+embeddings do. Refusal accuracy is 1.000 across the board, with the
+usual caveat: fake embeddings blur the gate (a weather question
+scores 0.286 against this corpus, uncomfortably close to the 0.25
+line), while real embeddings separate the bands far more cleanly.
+Re-run with `python scripts/run_eval.py --real` for numbers with
+production embeddings.
 
 **Limitations and next steps**, in the order they'd bite:
 
-- **Corpus size.** Three documents prove the shape, nothing more. The
+- **Corpus size.** Six documents prove the shape, nothing more. The
   real corpus is a few hundred guidance documents, with the eval set
-  grown to 30–50 questions — that's when chunking and fusion choices
-  start to separate in the table.
+  grown alongside — that's when chunking and fusion choices start to
+  separate *decisively* in the table, not by a few points.
 - **The numpy store.** Exact search over a few hundred chunks is
-  instant; over a few hundred thousand it's not. `HybridIndex` is the
-  deliberate swap-in point for Qdrant or pgvector — same interface,
-  real index underneath.
-- **No reranking.** Hybrid search returns a good top-5, but a
-  cross-encoder reranker over the top 20 is the standard next quality
-  step — and the eval harness is already there to prove whether it
-  helps.
+  instant; over a few hundred thousand it's not. Persistence now has
+  a SQLite backend, but search still runs in memory — `HybridIndex`
+  remains the deliberate swap-in point for Qdrant or pgvector, same
+  interface, real index underneath.
+- **Reranking is a heuristic, for now.** The lexical reranker makes
+  the second stage real and testable, but a cross-encoder over the
+  top 20 is the standard quality step — and the eval harness is
+  already there to prove whether it helps.
 - **The refusal threshold is corpus-tuned.** 0.25 separates this
-  corpus cleanly (0.40+ vs 0.16−); a bigger, more varied corpus will
-  narrow that gap, and the threshold — plus logging of refused and
-  low-confidence queries — becomes an operational setting to monitor,
-  not a constant to forget.
+  corpus cleanly with real embeddings (0.40+ vs 0.16−); a bigger,
+  more varied corpus will narrow that gap. The query log and the
+  eval set's refusal cases now exist precisely so the threshold is
+  an operational setting that gets *measured*, not a constant that
+  gets forgotten.
 
 The scaffold's job was to make every one of those steps a small,
 measurable change instead of a rewrite. That part, at least, the

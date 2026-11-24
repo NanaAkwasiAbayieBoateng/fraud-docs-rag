@@ -1,1 +1,130 @@
-[{"question":"What is an authorized push payment scam?","source":"app_scams.md"},{"question":"How do criminals impersonate bank staff in push payment scams?","source":"app_scams.md"},{"question":"What is Confirmation of Payee and how does it help prevent scams?","source":"app_scams.md"},{"question":"Will victims of APP scams be reimbursed by their bank?","source":"app_scams.md"},{"question":"How are money mules recruited?","source":"money_mules.md"},{"question":"What are the red flags of a money mule job offer?","source":"money_mules.md"},{"question":"What are the consequences for money mules who are caught?","source":"money_mules.md"},{"question":"What is card-not-present fraud?","source":"card_not_present.md"},{"question":"How does 3-D Secure reduce card-not-present fraud?","source":"card_not_present.md"},{"question":"What is credential stuffing and how does it expose saved cards?","source":"card_not_present.md"},{"question":"What is a chargeback and who bears the cost?","source":"card_not_present.md"}]
+[
+  {
+    "question": "What is an authorized push payment scam?",
+    "source": "app_scams.md"
+  },
+  {
+    "question": "How do criminals impersonate bank staff in push payment scams?",
+    "source": "app_scams.md"
+  },
+  {
+    "question": "What is Confirmation of Payee and how does it help prevent scams?",
+    "source": "app_scams.md"
+  },
+  {
+    "question": "Will victims of APP scams be reimbursed by their bank?",
+    "source": "app_scams.md"
+  },
+  {
+    "question": "How are money mules recruited?",
+    "source": "money_mules.md"
+  },
+  {
+    "question": "What are the red flags of a money mule job offer?",
+    "source": "money_mules.md"
+  },
+  {
+    "question": "What are the consequences for money mules who are caught?",
+    "source": "money_mules.md"
+  },
+  {
+    "question": "What is card-not-present fraud?",
+    "source": "card_not_present.md"
+  },
+  {
+    "question": "How does 3-D Secure reduce card-not-present fraud?",
+    "source": "card_not_present.md"
+  },
+  {
+    "question": "What is credential stuffing and how does it expose saved cards?",
+    "source": "card_not_present.md"
+  },
+  {
+    "question": "What is a chargeback and who bears the cost?",
+    "source": "card_not_present.md"
+  },
+  {
+    "question": "What is smishing and how is it different from phishing?",
+    "source": "phishing_smishing.md"
+  },
+  {
+    "question": "How can I tell if an email claiming to be from my bank is a phishing attempt?",
+    "source": "phishing_smishing.md"
+  },
+  {
+    "question": "I entered my password on a fake banking site. What should I do now?",
+    "source": "phishing_smishing.md"
+  },
+  {
+    "question": "A text says my parcel delivery is held and asks me to pay a fee through a link. Is it a scam?",
+    "source": "phishing_smishing.md"
+  },
+  {
+    "question": "What is account takeover fraud?",
+    "source": "account_takeover.md"
+  },
+  {
+    "question": "What are the warning signs that someone has taken over my account?",
+    "source": "account_takeover.md"
+  },
+  {
+    "question": "How do I recover an account that has been taken over?",
+    "source": "account_takeover.md"
+  },
+  {
+    "question": "How can I prevent my accounts from being taken over?",
+    "source": "account_takeover.md"
+  },
+  {
+    "question": "How do cryptocurrency investment scams work?",
+    "source": "crypto_investment_scams.md"
+  },
+  {
+    "question": "What are the red flags of an investment scam?",
+    "source": "crypto_investment_scams.md"
+  },
+  {
+    "question": "A trading platform says I must pay a release fee before I can withdraw my profits. What is happening?",
+    "source": "crypto_investment_scams.md"
+  },
+  {
+    "question": "Someone I met on a dating app wants to teach me crypto investing. Should I trust them?",
+    "source": "crypto_investment_scams.md"
+  },
+  {
+    "question": "A caller from my bank says my account is at risk and I must move my money to a safe account. What should I do?",
+    "source": "app_scams.md"
+  },
+  {
+    "question": "An online contact wants me to receive money in my account and forward it as cryptocurrency for a commission. Is this legitimate?",
+    "source": "money_mules.md"
+  },
+  {
+    "question": "Attackers tried thousands of breached passwords against our login page. What is this attack called?",
+    "source": "account_takeover.md"
+  },
+  {
+    "question": "Why did the shop charge me back after a customer paid with a stolen card online?",
+    "source": "card_not_present.md"
+  },
+  {
+    "question": "How do I bake sourdough bread at home?",
+    "source": null,
+    "expect_refusal": true
+  },
+  {
+    "question": "What is the weather forecast for this weekend?",
+    "source": null,
+    "expect_refusal": true
+  },
+  {
+    "question": "Which stocks should I buy for the best returns this year?",
+    "source": null,
+    "expect_refusal": true
+  },
+  {
+    "question": "Can you write a poem about autumn leaves?",
+    "source": null,
+    "expect_refusal": true
+  }
+]

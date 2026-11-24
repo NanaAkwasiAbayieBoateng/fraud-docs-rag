@@ -5,7 +5,7 @@ Part of the [ML / AI Engineer Roadmap](https://github.com/NanaAkwasiAbayieBoaten
 
 A retrieval-augmented generation app over fraud/AML documents, with measured retrieval quality. The evaluation report is a first-class deliverable. All LLM work runs locally on [Ollama](https://ollama.com) — free and open source, no API keys: chat model `llama3.1:8b`, embedding model `nomic-embed-text` (both configurable via `OLLAMA_MODEL` / `OLLAMA_EMBED_MODEL`).
 
-Ships with three short sample documents (`data/sample_docs/`: APP scams, money mules, card-not-present fraud) and an 11-question eval set (`data/eval_set.json`), so it runs out of the box.
+Ships with six short sample documents (`data/sample_docs/`: APP scams, money mules, card-not-present fraud, phishing/smishing, account takeover, crypto & investment scams) and a 31-question eval set (`data/eval_set.json`) — 27 questions mapped to their source document plus 4 off-topic refusal cases — so it runs out of the box.
 
 📖 New here? Read [BLOG_POST.md](BLOG_POST.md) — a file-by-file walkthrough of the whole project.
 
@@ -48,6 +48,21 @@ curl -s -X POST http://localhost:8000/ask \
   -d '{"question": "How are money mules recruited?"}'
 ```
 
+Retrieval only, no LLM call — for debugging ranking (add
+`"source": "money_mules.md"` to either endpoint to restrict it to one
+document):
+
+```bash
+curl -s -X POST http://localhost:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "How are money mules recruited?", "k": 3}'
+```
+
+Every `/ask` is appended to a JSONL query log (`logs/queries.jsonl` by
+default; set `RAG_QUERY_LOG` to move it, or to an empty value to
+disable) with its best score and whether it was refused — the data for
+tuning the refusal threshold.
+
 **No Ollama?** The whole flow also runs offline with deterministic fake
 embeddings — useful for CI and a first look:
 
@@ -84,14 +99,19 @@ docker run --rm -p 8000:8000 -e OLLAMA_HOST=http://host.docker.internal:11434 fr
 
 - `rag_app/ollama_client.py` — Ollama HTTP client (chat + embed) and a deterministic `FakeOllamaClient` for tests/offline runs.
 - `rag_app/chunking.py` — three chunking strategies: `fixed_size` (sliding window with overlap), `recursive` (paragraph/sentence aware), `structure_aware` (one chunk per heading section).
-- `rag_app/index.py` — hybrid index: numpy cosine vector store + BM25 (`rank_bm25`), fused ranking, persisted to a local JSON file.
-- `rag_app/ingest.py` — loads `.md`/`.txt` documents, chunks, embeds, saves the index.
-- `rag_app/evaluate.py` — recall@k and MRR against the eval set.
-- `rag_app/main.py` — FastAPI app: `GET /health`, `POST /ask`. Answers only from retrieved passages, returns citations, and refuses when the top hit's cosine similarity is below `RAG_REFUSAL_THRESHOLD` (default 0.25).
+- `rag_app/index.py` — hybrid index: numpy cosine vector store + BM25 (`rank_bm25`), two fusion strategies (linear score fusion, or Reciprocal Rank Fusion with `fusion="rrf"`), optional per-document filtering, and two persistence backends behind `save_to`/`load_from` — one JSON file, or SQLite when the path ends in `.db`/`.sqlite`.
+- `rag_app/ingest.py` — loads `.md`/`.txt` documents, chunks, embeds, saves the index (JSON or SQLite, by output suffix).
+- `rag_app/rerank.py` — optional second-stage reranker (`RAG_RERANK=1`): re-scores the top candidates by query-term coverage before they reach the prompt. A cross-encoder slots in behind the same interface.
+- `rag_app/evaluate.py` — recall@k, MRR, and refusal accuracy against the eval set.
+- `rag_app/main.py` — FastAPI app: `GET /health`, `POST /ask`, `POST /search`. Answers only from retrieved passages, returns citations, refuses when the top hit's cosine similarity is below `RAG_REFUSAL_THRESHOLD` (default 0.25), and logs every question to the query log.
 
 Configuration is via environment variables — see `.env.example`
 (`OLLAMA_HOST`, `OLLAMA_MODEL`, `OLLAMA_EMBED_MODEL`, `RAG_INDEX_PATH`,
-`RAG_TOP_K`, `RAG_REFUSAL_THRESHOLD`, `RAG_FAKE_LLM`).
+`RAG_TOP_K`, `RAG_REFUSAL_THRESHOLD`, `RAG_FUSION`, `RAG_RERANK`,
+`RAG_QUERY_LOG`, `RAG_FAKE_LLM`).
+
+CI (`.github/workflows/ci.yml`) runs the tests, the offline eval, and a
+Docker build + container smoke test on every push.
 
 ## Plan
 
@@ -99,11 +119,11 @@ Configuration is via environment variables — see `.env.example`
 2. **Ingestion:** parse PDFs/HTML to clean text, dedupe, keep metadata (title, source, date) for citations and filtering.
 3. **Chunking experiment:** fixed-size with overlap vs recursive vs structure-aware — compared, not guessed. *(Scaffold: all three implemented and compared in `reports/eval_report.md`.)*
 4. **Index:** embeddings with metadata alongside each vector. *(Scaffold: local numpy store + BM25 instead of pgvector/Qdrant — the `HybridIndex` class is the swap-in point when the corpus outgrows memory.)*
-5. **Evaluation set first:** 30–50 questions with known source passages; recall@k and MRR before any tuning. *(Scaffold: 11 questions; grow toward 30–50 with the real corpus.)*
-6. **Retrieval:** vector-only baseline → hybrid search (BM25 + vector) → reranker, re-measuring after each change. *(Scaffold: hybrid done; reranker is next.)*
+5. **Evaluation set first:** 30–50 questions with known source passages; recall@k and MRR before any tuning. *(Scaffold: 31 questions including refusal cases; grow with the real corpus.)*
+6. **Retrieval:** vector-only baseline → hybrid search (BM25 + vector) → reranker, re-measuring after each change. *(Scaffold: hybrid done with linear and RRF fusion compared in the eval report; a lexical reranker is implemented behind a swap-in interface — a cross-encoder is the production upgrade.)*
 7. **Generation:** answers only from retrieved passages, with citations and explicit refusal when evidence is missing. *(Done in the scaffold.)*
 8. **Serving:** FastAPI + a minimal UI, deployed; index/model versions visible. *(Scaffold: FastAPI + `/health` reporting models and index size; UI and deployment next.)*
-9. **Monitoring:** log low-confidence and refused queries; weekly sampling with an LLM judge.
+9. **Monitoring:** log low-confidence and refused queries; weekly sampling with an LLM judge. *(Scaffold: the JSONL query log is in; the LLM-judge sampling is next.)*
 
 ## Done when
 
@@ -111,4 +131,4 @@ A live URL plus a written eval report comparing chunking and retrieval variants 
 
 ## Stack
 
-Python · FastAPI · Ollama (llama3.1:8b + nomic-embed-text) · numpy · rank_bm25 · Docker (planned)
+Python · FastAPI · Ollama (llama3.1:8b + nomic-embed-text) · numpy · rank_bm25 · Docker · GitHub Actions CI

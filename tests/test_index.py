@@ -60,3 +60,40 @@ def test_save_and_load_roundtrip(index_and_client, tmp_path):
     assert [c.text for c in loaded.chunks] == [c.text for c in index.chunks]
     results = search(loaded, client, "money mules stolen money accounts")
     assert results[0].chunk.source == "mules.md"
+
+
+def test_rrf_search_ranks_relevant_doc_first(index_and_client):
+    index, client = index_and_client
+    results = index.search(
+        "How do money mules move stolen money?",
+        client.embed_one("How do money mules move stolen money?"),
+        k=3, fusion="rrf",
+    )
+    assert results[0].chunk.source == "mules.md"
+    assert all(r.score > 0 for r in results)
+
+
+def test_search_rejects_unknown_fusion(index_and_client):
+    index, client = index_and_client
+    with pytest.raises(ValueError):
+        index.search("money mules", client.embed_one("money mules"), fusion="bogus")
+
+
+def test_search_source_filter(index_and_client):
+    index, client = index_and_client
+    q = "How do money mules move stolen money?"
+    results = index.search(q, client.embed_one(q), k=3, sources={"scams.md"})
+    assert results and all(r.chunk.source == "scams.md" for r in results)
+    assert index.search(q, client.embed_one(q), sources={"nope.md"}) == []
+
+
+def test_sqlite_round_trip(index_and_client, tmp_path):
+    index, client = index_and_client
+    path = tmp_path / "index.db"
+    index.save_to(path)
+    loaded = HybridIndex.load_from(path)
+    assert len(loaded) == len(index)
+    q = "What is card-not-present fraud?"
+    before = index.search(q, client.embed_one(q), k=1)
+    after = loaded.search(q, client.embed_one(q), k=1)
+    assert after[0].chunk.source == before[0].chunk.source == "cards.md"

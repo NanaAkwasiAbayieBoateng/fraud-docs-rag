@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run tests
+        run: pytest -q
+      - name: Run retrieval eval (offline, fake embeddings)
+        run: python scripts/run_eval.py --report /tmp/eval_report.md
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the app image
+        run: docker build -t fraud-docs-rag .
+      - name: Smoke-test the container
+        run: |
+          docker run -d --name rag -p 8000:8000 \
+            -e RAG_FAKE_LLM=1 fraud-docs-rag
+          # RAG_FAKE_LLM=1 makes ingest use fake embeddings, so the
+          # entrypoint builds the full index with no Ollama running;
+          # assert /health reports a non-empty index.
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8000/health | grep -q '"chunks": [1-9]'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs rag
+          exit 1

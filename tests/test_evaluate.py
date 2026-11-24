@@ -1,6 +1,6 @@
 import pytest
 
-from rag_app.evaluate import evaluate_rankings, recall_at_k, reciprocal_rank
+from rag_app.evaluate import evaluate_index, evaluate_refusals, evaluate_rankings, recall_at_k, reciprocal_rank
 
 
 def test_recall_at_k_hit_and_miss():
@@ -32,3 +32,26 @@ def test_evaluate_rankings_aggregates():
 def test_evaluate_rankings_rejects_mismatched_lengths():
     with pytest.raises(ValueError):
         evaluate_rankings([], [{"question": "q", "source": "a.md"}])
+
+
+def test_evaluate_refusals_and_index_exclusion():
+    from rag_app.index import Chunk, HybridIndex
+    from rag_app.ollama_client import FakeOllamaClient
+
+    fake = FakeOllamaClient()
+    chunks = [
+        Chunk(text="Money mules move stolen money through their accounts.",
+              source="mules.md", chunk_index=0),
+        Chunk(text="Push payment scams trick victims into sending transfers.",
+              source="scams.md", chunk_index=0),
+    ]
+    index = HybridIndex(chunks=chunks, embeddings=fake.embed([c.text for c in chunks]))
+    eval_set = [
+        {"question": "How do money mules move stolen money?", "source": "mules.md"},
+        {"question": "How do I bake sourdough bread?", "source": None,
+         "expect_refusal": True},
+    ]
+    metrics = evaluate_index(index, fake, eval_set)
+    assert metrics["recall@1"] == 1.0  # refusal item excluded, not a miss
+    assert evaluate_refusals(index, fake, eval_set) == 1.0
+    assert evaluate_refusals(index, fake, eval_set[:1]) is None

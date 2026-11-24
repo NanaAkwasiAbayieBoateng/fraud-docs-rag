@@ -49,7 +49,8 @@ def build_index(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the RAG index from documents.")
     parser.add_argument("--docs", default="data/sample_docs")
-    parser.add_argument("--out", default="data/index.json")
+    parser.add_argument("--out", default="data/index.json",
+                        help="Output path; a .db/.sqlite suffix selects the SQLite backend.")
     parser.add_argument("--strategy", default="fixed_size",
                         choices=["fixed_size", "recursive", "structure_aware"])
     parser.add_argument("--chunk-size", type=int, default=800)
@@ -63,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         args.docs, client, strategy=args.strategy,
         chunk_size=args.chunk_size, overlap=args.overlap,
     )
-    index.save(args.out)
+    index.save_to(args.out)
     sources = sorted({c.source for c in index.chunks})
     print(f"Indexed {len(index)} chunks from {len(sources)} documents -> {args.out}")
     return 0

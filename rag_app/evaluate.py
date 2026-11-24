@@ -1,8 +1,13 @@
-"""Retrieval evaluation: recall@k and mean reciprocal rank (MRR).
+"""Retrieval evaluation: recall@k, mean reciprocal rank (MRR), refusals.
 
 An eval item is ``{"question": ..., "source": ...}`` where ``source`` is
 the name of the document that answers the question. A retrieved chunk is
 relevant when its ``source`` matches.
+
+Items with ``"expect_refusal": true`` (and no source) measure the other
+half of quality: questions the corpus cannot answer should be refused.
+``evaluate_refusals`` scores them against the same raw-cosine gate the
+API uses.
 """
 
 from __future__ import annotations
@@ -44,11 +49,38 @@ def evaluate_rankings(
     return metrics
 
 
-def evaluate_index(index, client, eval_set: list[dict], k: int = 5) -> dict[str, float]:
-    """Run every eval question through an index and aggregate the metrics."""
+def evaluate_index(index, client, eval_set: list[dict], k: int = 5,
+                   fusion: str = "linear") -> dict[str, float]:
+    """Run every sourced eval question through an index, aggregate metrics.
+
+    Refusal items (no source) are excluded here; score them with
+    ``evaluate_refusals``.
+    """
+    sourced = [item for item in eval_set if item.get("source")]
     rankings = []
-    for item in eval_set:
+    for item in sourced:
         embedding = client.embed_one(item["question"])
-        results = index.search(item["question"], embedding, k=k)
+        results = index.search(item["question"], embedding, k=k, fusion=fusion)
         rankings.append([r.chunk.source for r in results])
-    return evaluate_rankings(rankings, eval_set)
+    return evaluate_rankings(rankings, sourced)
+
+
+def evaluate_refusals(index, client, eval_set: list[dict], threshold: float = 0.25,
+                      fusion: str = "linear") -> float | None:
+    """Fraction of refusal-expected questions the gate would refuse.
+
+    Mirrors the API: a question is refused when there are no results or
+    the top hit's raw cosine similarity is below ``threshold``. Returns
+    None when the eval set has no refusal items.
+    """
+    items = [item for item in eval_set if item.get("expect_refusal")]
+    if not items:
+        return None
+    correct = 0
+    for item in items:
+        embedding = client.embed_one(item["question"])
+        results = index.search(item["question"], embedding, k=1, fusion=fusion)
+        best = results[0].vector_score if results else 0.0
+        if best < threshold:
+            correct += 1
+    return correct / len(items)

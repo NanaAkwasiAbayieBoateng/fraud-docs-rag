@@ -11,3 +11,6 @@ mlruns/
 # Generated index (rebuild with: python -m rag_app.ingest)
 data/index.json
 mlflow.db
+
+# Query logs (runtime output of RAG_QUERY_LOG)
+logs/
