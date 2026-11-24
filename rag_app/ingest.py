@@ -1,4 +1,8 @@
-"""Ingestion: load .md/.txt documents, chunk them, embed, persist the index.
+"""Ingestion: load documents, chunk them, embed, persist the index.
+
+Supported formats (see rag_app/documents.py): .md, .txt, .pdf, .docx,
+.xlsx, .csv. A file that fails to parse is skipped with a warning
+rather than aborting the whole build.
 
 Usage:
     python -m rag_app.ingest --docs data/sample_docs --out data/index.json
@@ -8,22 +12,29 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from rag_app.chunking import chunk_text
+from rag_app.documents import SUPPORTED_SUFFIXES, extract_text
 from rag_app.index import Chunk, HybridIndex
 from rag_app.ollama_client import make_client
 
-SUPPORTED_SUFFIXES = {".md", ".txt"}
-
 
 def load_documents(docs_dir: str | Path) -> list[tuple[str, str]]:
-    """Return (source_name, text) pairs for every supported doc in a folder."""
+    """Return (source_name, text) pairs for every supported doc in a folder.
+
+    Files in a supported format that fail to parse are skipped with a
+    warning on stderr; unsupported formats are ignored entirely.
+    """
     docs_dir = Path(docs_dir)
     documents = []
     for path in sorted(docs_dir.iterdir()):
         if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES:
-            documents.append((path.name, path.read_text(encoding="utf-8")))
+            try:
+                documents.append((path.name, extract_text(path)))
+            except Exception as exc:  # one bad file must not sink the build
+                print(f"warning: skipping {path.name}: {exc}", file=sys.stderr)
     return documents
 
 

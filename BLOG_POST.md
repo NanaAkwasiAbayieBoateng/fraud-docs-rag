@@ -18,11 +18,11 @@ Everything runs locally and free: the language model and the embeddings
 come from [Ollama](https://ollama.com) running on your own machine. No API
 keys, no cloud bill, no data leaving the laptop.
 
-The shipped corpus is deliberately tiny — six short sample documents
+The shipped corpus is deliberately tiny — seven short sample documents
 (authorised push payment scams, money mules, card-not-present fraud,
-phishing and smishing, account takeover, crypto and investment scams)
-and a 31-question test set — so the whole pipeline can be read, run, and
-measured in an afternoon. The point of the scaffold is the *shape* of a
+phishing and smishing, account takeover, crypto and investment scams,
+and a chargeback reason-code table) and a 33-question test set — so the
+whole pipeline can be read, run, and measured in an afternoon. The point of the scaffold is the *shape* of a
 real RAG system: ingest → chunk → embed → retrieve → answer → evaluate.
 
 ---
@@ -42,13 +42,16 @@ real RAG system: ingest → chunk → embed → retrieve → answer → evaluate
 | **pytest + a fake Ollama client** | The test suite | Tests must run anywhere, including CI with no Ollama installed. So the codebase has a `FakeOllamaClient` with the same interface as the real one — tests inject it and never touch the network. |
 | **Reciprocal Rank Fusion** | The alternative fusion strategy | Fuses the vector and BM25 *rankings* instead of their scores, so it is immune to score-scale differences. Implemented alongside the original linear fusion so the eval harness can measure which one actually retrieves better — on this corpus, linear wins (see the results). |
 | **SQLite** (stdlib) | The second index-persistence backend | No new dependency: Python's built-in `sqlite3`. One row per chunk, embeddings as blobs — inspectable with ordinary SQL tooling, and the shape a real vector store would take behind the same interface. |
+| **pypdf / python-docx / openpyxl** | Reading PDF, Word, and Excel documents | Guidance documents arrive as PDFs, Word files, and spreadsheets at least as often as Markdown. One small, single-purpose library per format, all behind one `extract_text` function — and CSV needs nothing at all, just the standard library. |
 | **GitHub Actions** | CI | Every push runs the tests, the offline eval, and a Docker build with a container smoke test — so a broken image or a retrieval regression is caught before it lands. |
 | **Docker + Compose** | Packaging and one-command startup | The app already talks to Ollama over HTTP, so the two containerise as separate services: a small image for the API, the stock Ollama image for the models, and Compose to wire them together. Anyone can run the whole system with `docker compose up --build` — no Python or Ollama install to get right first. |
 
-The dependency list really is that short: `fastapi`, `uvicorn`, `httpx`,
-`pydantic`, `numpy`, `rank_bm25` — pinned in `requirements.txt`, which
-is also exactly what the Docker image installs. `pytest` lives in
-`requirements-dev.txt`, so the test runner never ships in the image.
+The dependency list is still short: `fastapi`, `uvicorn`, `httpx`,
+`pydantic`, `numpy`, `rank_bm25`, plus one parser per document format
+— `pypdf`, `python-docx`, `openpyxl` — all pinned in
+`requirements.txt`, which is also exactly what the Docker image
+installs. `pytest` lives in `requirements-dev.txt`, so the test
+runner never ships in the image.
 
 ---
 
@@ -98,8 +101,10 @@ before it, which is also the order to read the code in.
    refusal cases in the eval set, a query log so real refusals can
    be studied, RRF as a second fusion strategy for the harness to
    judge, a retrieval-only `/search` endpoint for debugging, an
-   optional reranker, and a SQLite persistence backend. Each piece
-   is walked through in its file's section below.
+   optional reranker, a SQLite persistence backend, and ingestion
+   for the formats guidance really arrives in — PDF, Word, Excel,
+   CSV — instead of Markdown alone. Each piece is walked through in
+   its file's section below.
 
 ---
 
@@ -215,13 +220,47 @@ The heart of retrieval. Two dataclasses and one class:
   for ranking, but it makes the fused score useless as a confidence
   measure. Remember this when you reach the refusal gate.
 
+### `rag_app/documents.py` — reading real-world formats
+
+Guidance does not arrive as tidy Markdown. It arrives as PDFs from a
+regulator, Word documents from a training team, spreadsheets of
+reason codes, and CSV exports — so ingestion starts here, with one
+`extract_text(path)` function dispatching on file suffix:
+
+- **`.md` / `.txt`** — read as-is.
+- **`.pdf`** (pypdf) — text extracted page by page, each page under
+  a `## Page N` heading, so the structure-aware chunker keeps page
+  context in every chunk. Scanned-image PDFs extract nothing (there
+  is no text layer); OCR is deliberately out of scope.
+- **`.docx`** (python-docx) — paragraphs in order, then table rows
+  rendered as `cell | cell | cell`.
+- **`.xlsx`** (openpyxl) — one section per sheet under a
+  `## Sheet: name` heading; each data row becomes one line.
+- **`.csv`** (standard library) — the same row rendering as Excel:
+  the header row names each field, and every row becomes
+  `Header: value; Header: value`. A chargeback table row turns into
+  "Category: Fraud; Reason code: 10.4; Meaning: Card-not-present
+  fraud…" — text an embedding can actually match a question against,
+  which a raw comma-joined line does far less well.
+
+Legacy `.doc` / `.xls` files raise a clear "unsupported format"
+error — the modern libraries do not read the old binary formats, and
+pretending otherwise would fail silently. The sample corpus proves
+the CSV path end to end (`chargeback_reason_codes.csv` is a real
+corpus document with its own eval questions); the other formats are
+covered by tests that generate genuine files — including a committed
+two-page PDF fixture — and extract them.
+
 ### `rag_app/ingest.py` — building the index
 
 The offline half of the system; you run it whenever the documents
 change.
 
-- `load_documents(docs_dir)` reads every `.md` / `.txt` file in a
-  folder into `(source_name, text)` pairs, in sorted order.
+- `load_documents(docs_dir)` reads every supported file in a folder
+  (via `documents.extract_text`) into `(source_name, text)` pairs, in
+  sorted order. A file that fails to parse is skipped with a warning
+  rather than aborting the build — one corrupt PDF in a folder of
+  fifty should not cost you the other forty-nine.
 - `build_index(docs_dir, client, strategy, ...)` chunks each document,
   wraps the pieces in `Chunk` objects (recording which strategy made
   them in the metadata), embeds all chunk texts in one batch call, and
@@ -329,8 +368,9 @@ switchable) so a cross-encoder can replace it with one new class.
 
 ### `data/sample_docs/` — the corpus
 
-Six short, original guidance documents, each organised under clear
-Markdown headings (which is what `structure_aware` chunking exploits):
+Seven short, original guidance documents — six Markdown files organised
+under clear headings (which is what `structure_aware` chunking
+exploits), plus one CSV table:
 
 - **`app_scams.md`** — authorised push payment scams: what they are,
   how criminals impersonate bank staff, Confirmation of Payee,
@@ -345,6 +385,10 @@ Markdown headings (which is what `structure_aware` chunking exploits):
   the warning signs, recovery and prevention.
 - **`crypto_investment_scams.md`** — crypto and investment scams:
   fake trading platforms, withdrawal-fee traps, recovery-agent scams.
+- **`chargeback_reason_codes.csv`** — a small table of chargeback
+  reason codes (category, code, meaning, who bears the cost). The
+  corpus's one non-Markdown document, there to prove tabular data
+  retrieves properly once rows are rendered as `header: value` text.
 
 In a production version this folder is where a few hundred real
 guidance documents would live; the code doesn't care how many there
@@ -352,7 +396,7 @@ are.
 
 ### `data/eval_set.json` — the test questions
 
-Thirty-one questions in a simple JSON list, each shaped like:
+Thirty-three questions in a simple JSON list, each shaped like:
 
 ```json
 {"question": "How are money mules recruited?", "source": "money_mules.md"}
@@ -389,10 +433,10 @@ the closing section below). It's committed to the repo on purpose —
 the evaluation report is a first-class output of the project, not a
 by-product. Re-running the script overwrites it.
 
-### `tests/` — 34 tests, no Ollama required
+### `tests/` — 41 tests, no Ollama required
 
 Every test injects `FakeOllamaClient`, so the suite runs offline in
-seconds (`pytest -q` → 34 passed):
+seconds (`pytest -q` → 41 passed):
 
 - **`test_chunking.py`** (8 tests) — all three strategies return
   non-empty chunks; fixed-size respects its size limit and handles
@@ -426,13 +470,21 @@ seconds (`pytest -q` → 34 passed):
 - **`test_rerank.py`** (2 tests) — the lexical reranker promotes a
   chunk covering the whole query over a higher-scored chunk covering
   part of it, and the exact-phrase bonus wins at k=1.
+- **`test_documents.py`** (7 tests) — one per format, against real
+  files: text/Markdown pass through; CSV rows render with their
+  headers; a generated .docx yields its paragraphs and table; a
+  generated .xlsx renders its data sheet and skips the empty one; a
+  committed two-page PDF fixture extracts with page headings; a
+  legacy .doc raises the unsupported-format error; and a folder
+  containing one corrupt PDF still loads its good document.
 
 ### `requirements.txt` and `requirements-dev.txt`
 
 `requirements.txt` is the runtime list, and since the Docker work it
-is pinned and runtime-only — six lines: `fastapi`, `uvicorn` (the
+is pinned and runtime-only — nine lines: `fastapi`, `uvicorn` (the
 server), `httpx`, `pydantic` (FastAPI's validation layer), `numpy`,
-`rank_bm25`. Pinning matters more once a Dockerfile installs the file:
+`rank_bm25`, and the three document parsers (`pypdf`, `python-docx`,
+`openpyxl`). Pinning matters more once a Dockerfile installs the file:
 the image you build next month should be the image you tested.
 
 `pytest` moved to `requirements-dev.txt`, which starts with
@@ -588,17 +640,17 @@ command, start `uvicorn`. No Ollama? The README's offline variant
 embeddings.
 
 **Current eval results** (from `reports/eval_report.md` — sample
-corpus, fake embeddings, hybrid search at top-5, 27 sourced questions
+corpus, fake embeddings, hybrid search at top-5, 29 sourced questions
 plus 4 refusal cases):
 
 | Chunking | Fusion | Chunks | Recall@1 | Recall@3 | Recall@5 | MRR | Refusal acc |
 |---|---|---|---|---|---|---|---|
-| fixed_size | linear | 20 | 0.889 | 1.000 | 1.000 | 0.944 | 1.000 |
-| fixed_size | rrf | 20 | 0.815 | 0.963 | 1.000 | 0.898 | 1.000 |
-| recursive | linear | 20 | 0.889 | 0.963 | 1.000 | 0.933 | 1.000 |
-| recursive | rrf | 20 | 0.815 | 0.926 | 1.000 | 0.873 | 1.000 |
-| structure_aware | linear | 22 | 0.926 | 1.000 | 1.000 | 0.963 | 1.000 |
-| structure_aware | rrf | 22 | 0.926 | 0.963 | 1.000 | 0.952 | 1.000 |
+| fixed_size | linear | 22 | 0.897 | 1.000 | 1.000 | 0.948 | 1.000 |
+| fixed_size | rrf | 22 | 0.828 | 0.966 | 0.966 | 0.891 | 1.000 |
+| recursive | linear | 22 | 0.862 | 0.966 | 1.000 | 0.915 | 0.750 |
+| recursive | rrf | 22 | 0.793 | 0.966 | 1.000 | 0.876 | 1.000 |
+| structure_aware | linear | 24 | 0.931 | 1.000 | 1.000 | 0.966 | 1.000 |
+| structure_aware | rrf | 24 | 0.862 | 0.966 | 1.000 | 0.922 | 1.000 |
 
 The first version of this table was three rows of perfect 1.000s —
 three documents and 11 easy questions measured nothing. The expanded
@@ -607,16 +659,21 @@ set earns its keep: the strategies finally separate
 default — *loses* to plain linear fusion on this corpus. That is the
 harness doing its job: the answer to "which fusion?" is a number, not
 a preference, and the number can change when the corpus or the
-embeddings do. Refusal accuracy is 1.000 across the board, with the
-usual caveat: fake embeddings blur the gate (a weather question
-scores 0.286 against this corpus, uncomfortably close to the 0.25
-line), while real embeddings separate the bands far more cleanly.
+embeddings do. Refusal accuracy is 1.000 in five of six rows — the
+exception is itself a finding: adding the CSV table shifted the
+chunk boundaries under `recursive` chunking just enough that one
+off-topic question now slips past the gate (0.750). Refusals are a
+property of the whole pipeline, not just the threshold. And the
+standing caveat applies throughout: fake embeddings blur the gate
+(a weather question scores 0.286 against this corpus, uncomfortably
+close to the 0.25 line), while real embeddings separate the bands
+far more cleanly.
 Re-run with `python scripts/run_eval.py --real` for numbers with
 production embeddings.
 
 **Limitations and next steps**, in the order they'd bite:
 
-- **Corpus size.** Six documents prove the shape, nothing more. The
+- **Corpus size.** Seven documents prove the shape, nothing more. The
   real corpus is a few hundred guidance documents, with the eval set
   grown alongside — that's when chunking and fusion choices start to
   separate *decisively* in the table, not by a few points.
@@ -625,6 +682,10 @@ production embeddings.
   a SQLite backend, but search still runs in memory — `HybridIndex`
   remains the deliberate swap-in point for Qdrant or pgvector, same
   interface, real index underneath.
+- **No OCR.** A scanned PDF with no text layer extracts nothing and
+  is skipped at ingest with a warning. Document-AI/OCR ingestion is
+  a real production need for regulator PDFs; it is a deliberate
+  non-goal here.
 - **Reranking is a heuristic, for now.** The lexical reranker makes
   the second stage real and testable, but a cross-encoder over the
   top 20 is the standard quality step — and the eval harness is

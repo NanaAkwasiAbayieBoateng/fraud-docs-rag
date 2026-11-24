@@ -1,0 +1,7 @@
+Category,Reason code,Meaning,Who bears the cost
+Fraud,10.4,Card-not-present fraud - cardholder did not authorise the transaction,Merchant unless 3-D Secure was used
+Fraud,13.1,Merchandise or services not received by the cardholder,Merchant
+Authorisation,11.1,No valid authorisation was obtained for the transaction,Merchant
+Processing error,12.6,Duplicate processing - the cardholder was charged more than once,Merchant
+Consumer dispute,13.3,Product or service not as described or defective,Merchant
+Consumer dispute,13.6,Credit not processed after a refund was promised,Merchant

@@ -108,6 +108,14 @@
     "source": "card_not_present.md"
   },
   {
+    "question": "What does chargeback reason code 10.4 mean?",
+    "source": "chargeback_reason_codes.csv"
+  },
+  {
+    "question": "Who bears the cost of a duplicate processing chargeback?",
+    "source": "chargeback_reason_codes.csv"
+  },
+  {
     "question": "How do I bake sourdough bread at home?",
     "source": null,
     "expect_refusal": true
